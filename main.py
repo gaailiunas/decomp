@@ -1,12 +1,114 @@
 from elftools.elf.elffile import ELFFile
+from capstone import *
+from capstone.x86 import *
+
+def get_symbol_at_address(elffile, target_address):
+    for section in elffile.iter_sections():
+        if section.header['sh_type'] in ('SHT_RELA', 'SHT_REL'):
+            for relocation in section.iter_relocations():
+                if relocation['r_offset'] == target_address:
+                    symtab = elffile.get_section(section.header['sh_link'])
+                    symbol = symtab.get_symbol(relocation['r_info_sym'])
+                    return symbol.name
+                    
+    dynsym = elffile.get_section('.dynsym')
+    if dynsym:
+        for symbol in dynsym.iter_symbols():
+            if symbol.entry['st_value'] == target_address:
+                return symbol.name
+                
+    return None
+
+def calculate_target(insn):
+    if len(insn.operands) > 0:
+        for op in insn.operands:
+            if op.type == CS_OP_IMM:
+                return op.imm
+            elif op.type == CS_OP_MEM:
+                if op.mem.base == X86_REG_RIP:
+                    return insn.address + insn.size + op.mem.disp
+                elif op.mem.base == X86_REG_INVALID and op.mem.index == X86_REG_INVALID:
+                    return op.mem.disp
+    return None
 
 if __name__ == "__main__":
-    elffile = ELFFile(open("main", "rb"))
+    f = open("main", "rb")
+    elffile = ELFFile(f)
 
     entry_point = elffile.header.e_entry
     print(f"Entry point address: {hex(entry_point)}")
+    print(f"Object file type: {elffile.header.e_type}")
 
-    for seg in elffile.iter_segments():
+    md = Cs(CS_ARCH_X86, CS_MODE_64)    
+    md.detail = True
+
+    target_segment = None
+    for segment in elffile.iter_segments():
+        if segment['p_type'] == 'PT_LOAD':
+            vaddr = segment['p_vaddr']
+            memsz = segment['p_memsz']
+            
+            if vaddr <= entry_point < (vaddr + memsz):
+                target_segment = segment
+                break
+
+    if not target_segment:
+        print("could not find segment containing entry point")
+        exit()
+
+    segment_data = target_segment.data()
+    seg_start = target_segment.header.p_vaddr
+    seg_end = seg_start + target_segment.header.p_memsz
+
+    worklist = [entry_point, 0x1040]
+    visited_blocks = set()
+
+    while worklist:
+        current_address = worklist.pop(0)
+        if current_address in visited_blocks:
+            continue
+
+        visited_blocks.add(current_address)
+
+        if not (seg_start <= current_address < seg_end):
+            sym_name = get_symbol_at_address(elffile, current_address)
+            print(f"[external reference] {hex(current_address)} -> {sym_name if sym_name else 'Unknown'}")
+            continue
+
+        offset = current_address - target_segment.header.p_vaddr
+        code_bytes = segment_data[offset : offset + 256]
+
+        if not code_bytes:
+            break
+            
+        instructions = list(md.disasm(code_bytes, current_address))    
+
+        if not instructions:
+            break
+
+        for insn in instructions:
+            print(f"0x{insn.address:x}:\t{insn.mnemonic}\t{insn.op_str}")
+            
+            if insn.mnemonic == "jmp":
+                target = calculate_target(insn)
+                if target:
+                    worklist.append(target)
+                break
+            elif insn.mnemonic.startswith("j"):
+                target = calculate_target(insn)
+                if target:
+                    worklist.append(target)
+                fallthrough = insn.address + insn.size
+                worklist.append(fallthrough)
+                break
+            elif insn.mnemonic == "call":
+                target = calculate_target(insn)
+                if target:
+                    worklist.append(target)
+            elif insn.mnemonic in ["ret", "hlt"]:
+                break
+
+    """for seg in elffile.iter_segments():
         print(f"Type: {seg.header.p_type}\nOffset: {hex(seg.header.p_offset)}\nVirtual address: {hex(seg.header.p_vaddr)}\nPhysical address: {hex(seg.header.p_paddr)}\nSize in file: {hex(seg.header.p_filesz)}\nSize in memory: {hex(seg.header.p_memsz)}")
 
         print("Sections:")
@@ -15,4 +117,5 @@ if __name__ == "__main__":
                 print(f"{sec.name}, offset: {hex(sec.header.sh_offset)}, size: {hex(sec.header.sh_size)}")
 
         print("---")
+    """
 
