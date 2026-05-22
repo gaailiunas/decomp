@@ -31,6 +31,30 @@ def calculate_target(insn):
                     return op.mem.disp
     return None
 
+def read_string_at_vaddr(elffile, vaddr):
+    """
+    finds the segment containing the virtual address and reads characters until it hits a null terminator.
+    """
+    for segment in elffile.iter_segments():
+        if segment['p_type'] == 'PT_LOAD':
+            seg_start = segment.header.p_vaddr
+            seg_end = seg_start + segment.header.p_memsz
+            
+            if seg_start <= vaddr < seg_end:
+                data = segment.data()
+                offset = vaddr - seg_start
+                
+                string_bytes = bytearray()
+                while offset < len(data):
+                    char_byte = data[offset]
+                    if char_byte == 0: # null term
+                        break
+                    string_bytes.append(char_byte)
+                    offset += 1
+                    
+                return string_bytes.decode('utf-8', errors='replace')
+    return None
+
 if __name__ == "__main__":
     f = open("main", "rb")
     elffile = ELFFile(f)
@@ -80,6 +104,9 @@ if __name__ == "__main__":
                 discovered_main = register_state["rdi"]
                 print(f"automatically discovered 'main' at: {hex(discovered_main)}")
                 worklist.append(discovered_main)
+            if sym_name == "printf" and register_state["rdi"] is not None:
+                fmt_string = read_string_at_vaddr(elffile, register_state["rdi"])
+                print(f"printf rdi: {hex(register_state["rdi"])}, fmtstr: {fmt_string.encode("utf-8")}")
 
             continue
 
