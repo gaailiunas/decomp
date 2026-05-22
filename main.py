@@ -60,8 +60,10 @@ if __name__ == "__main__":
     seg_start = target_segment.header.p_vaddr
     seg_end = seg_start + target_segment.header.p_memsz
 
-    worklist = [entry_point, 0x1040]
+    worklist = [entry_point]
     visited_blocks = set()
+
+    register_state = {"rdi": None}
 
     while worklist:
         current_address = worklist.pop(0)
@@ -73,6 +75,12 @@ if __name__ == "__main__":
         if not (seg_start <= current_address < seg_end):
             sym_name = get_symbol_at_address(elffile, current_address)
             print(f"[external reference] {hex(current_address)} -> {sym_name if sym_name else 'Unknown'}")
+
+            if sym_name == "__libc_start_main" and register_state["rdi"] is not None:
+                discovered_main = register_state["rdi"]
+                print(f"automatically discovered 'main' at: {hex(discovered_main)}")
+                worklist.append(discovered_main)
+
             continue
 
         offset = current_address - target_segment.header.p_vaddr
@@ -86,9 +94,15 @@ if __name__ == "__main__":
         if not instructions:
             break
 
+        print(f"--- disassembling block at {hex(current_address)} ---")
         for insn in instructions:
             print(f"0x{insn.address:x}:\t{insn.mnemonic}\t{insn.op_str}")
             
+            if insn.mnemonic in ["lea", "mov"] and insn.op_str.startswith("rdi,"):
+                target = calculate_target(insn)
+                if target:
+                    register_state["rdi"] = target
+
             if insn.mnemonic == "jmp":
                 target = calculate_target(insn)
                 if target:
